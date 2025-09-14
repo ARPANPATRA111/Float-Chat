@@ -1,0 +1,11 @@
+In the Quickconnect bar at the top:
+Host: ftp.ifremer.fr
+Username: anonymous
+Password: your_email@example.com
+Port: 21
+Click Quickconnect.
+
+
+cd net
+.venv\Scripts\activate
+execute commands
