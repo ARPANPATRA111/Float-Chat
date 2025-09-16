@@ -1,213 +1,113 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
-from backend import query_database, SQLQueryExecutor  # Import our backend functions
+from reg import RAGSQLQueryExecutor  # Import the main class from your script
 
-# --- Page Configuration ---
+# --- Streamlit Page Configuration ---
 st.set_page_config(
-    page_title="FloatChat 🌊",
-    page_icon="🤖",
-    layout="wide"
+    page_title="Argo Ocean Data Explorer",
+    page_icon="🌊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# --- Initialize session state ---
-if "query_history" not in st.session_state:
-    st.session_state.query_history = []
+# --- Main App UI ---
+st.title("🌊 Argo Ocean Data Explorer")
+st.markdown("""
+Welcome to the Argo Ocean Data Explorer! Ask a question in plain English about the oceanographic data, 
+and the AI will generate and execute the necessary SQL query to find the answer.
+""")
 
-# --- UI Elements ---
-st.title("FloatChat 🌊🤖")
-st.caption("Your AI-Powered Conversational Interface for ARGO Ocean Data")
+# --- Caching the Executor ---
+# This prevents re-initializing the model every time you interact with the app
+@st.cache_resource
+def get_executor():
+    """Creates and caches the RAGSQLQueryExecutor instance."""
+    try:
+        executor = RAGSQLQueryExecutor()
+        return executor
+    except Exception as e:
+        st.error(f"Failed to initialize the backend: {e}")
+        st.info("Please ensure Ollama is running (`ollama serve`) and the model is downloaded (`ollama pull llama3.2`).")
+        return None
 
-# Create two columns for better layout
-col1, col2 = st.columns([2, 1])
+executor = get_executor()
 
-with col1:
-    st.subheader("Ask Your Question")
-    
-    # Get user input
-    user_question = st.text_input(
-        "Ask a question about the ARGO float data:",
-        placeholder="e.g., How many floats are in the database? What's the deepest measurement?"
+if executor:
+    # --- User Input ---
+    st.sidebar.header("Ask a Question")
+    user_question = st.sidebar.text_area(
+        "Enter your question here:",
+        "What are the average temperature and salinity at depths greater than 1000 meters?",
+        height=100
     )
 
-    # --- Backend Logic ---
-    if st.button("Get Answer", type="primary", use_container_width=True):
-        if user_question:
-            with st.spinner("🤖 Analyzing your question and querying the database..."):
-                try:
-                    # Call the backend function
-                    result = query_database(user_question, max_rows=100)
-                    
-                    # Add to history
-                    st.session_state.query_history.append({
-                        "question": user_question,
-                        "result": result
-                    })
-                    
-                    if result['success']:
-                        st.success("✅ Query executed successfully!")
-                        
-                        # Display the generated SQL query
-                        with st.expander("🔍 Generated SQL Query", expanded=False):
-                            st.code(result['query'], language='sql')
-                        
-                        # Display results
-                        st.subheader("📊 Results")
-                        
-                        if result['data']:
-                            # Create DataFrame for display
-                            df = pd.DataFrame(result['data'])
-                            
-                            # Show metadata
-                            col_a, col_b, col_c = st.columns(3)
-                            with col_a:
-                                st.metric("Total Rows", result['total_rows'])
-                            with col_b:
-                                st.metric("Displayed Rows", result['displayed_rows'])
-                            with col_c:
-                                if result['truncated']:
-                                    st.warning(f"⚠️ Truncated")
-                                else:
-                                    st.success("✅ Complete")
-                            
-                            # Display the data table
-                            st.dataframe(df, use_container_width=True)
-                            
-                            # Download button for results
-                            csv = df.to_csv(index=False)
-                            st.download_button(
-                                label="📥 Download Results as CSV",
-                                data=csv,
-                                file_name=f"argo_query_results.csv",
-                                mime="text/csv"
-                            )
-                            
-                        else:
-                            st.info("📋 No data returned from the query.")
-                            
-                    else:
-                        st.error(f"❌ Query failed: {result['error']}")
-                        
-                        # Still show the attempted query for debugging
-                        if result['query']:
-                            with st.expander("🔍 Attempted SQL Query"):
-                                st.code(result['query'], language='sql')
-                        
-                except Exception as e:
-                    st.error(f"❌ An error occurred: {e}")
-        else:
-            st.warning("⚠️ Please enter a question.")
-
-with col2:
-    st.subheader("💡 Example Questions")
-    
+    # Pre-defined example questions
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Example Questions:")
     example_questions = [
         "How many unique floats are in the database?",
-        "What are the min and max temperatures recorded?",
-        "Show me the 10 deepest measurements",
-        "What's the average surface temperature by float?",
-        "Show me the geographical bounding box",
-        "How many profiles does each float have?",
-        "What's the temperature range at 1000m depth?",
-        "Show me measurements from the Southern Ocean"
+        "What are the temperature patterns in the Southern Ocean?",
+        "Show me the deepest measurements and their characteristics",
+        "What is the salinity distribution at different depths?",
     ]
-    
-    for i, example in enumerate(example_questions):
-        if st.button(example, key=f"example_{i}", use_container_width=True):
-            st.session_state.temp_question = example
-            # Auto-fill the text input
-            user_question = example
-            # Trigger the query automatically
-            with st.spinner("🤖 Processing example question..."):
+    for q in example_questions:
+        if st.sidebar.button(q):
+            user_question = q
+
+
+    if st.sidebar.button("Get Answer"):
+        if user_question:
+            with st.spinner("Analyzing your question and querying the database..."):
                 try:
-                    result = query_database(example, max_rows=100)
-                    st.session_state.query_history.append({
-                        "question": example,
-                        "result": result
-                    })
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error with example question: {e}")
+                    # --- RAG Pipeline Execution ---
+                    result = executor.query_with_rag(user_question, max_rows=50)
 
-# --- Query History Section ---
-if st.session_state.query_history:
-    st.markdown("---")
-    st.subheader("📚 Query History")
-    
-    # Option to clear history
-    if st.button("🗑️ Clear History", type="secondary"):
-        st.session_state.query_history = []
-        st.rerun()
-    
-    # Display history in reverse order (most recent first)
-    for i, entry in enumerate(reversed(st.session_state.query_history)):
-        with st.expander(f"Q{len(st.session_state.query_history)-i}: {entry['question'][:50]}{'...' if len(entry['question']) > 50 else ''}"):
-            
-            result = entry['result']
-            
-            # Show question and SQL
-            st.write("**Question:**", entry['question'])
-            st.code(result.get('query', 'No query generated'), language='sql')
-            
-            # Show results or error
-            if result['success'] and result['data']:
-                st.write(f"**Results:** {result['total_rows']} rows")
-                df_history = pd.DataFrame(result['data'])
-                st.dataframe(df_history.head(10), use_container_width=True)  # Show first 10 rows in history
-                
-                if len(result['data']) > 10:
-                    st.caption(f"Showing first 10 of {len(result['data'])} rows")
-            elif result['success']:
-                st.info("Query executed successfully but returned no data.")
-            else:
-                st.error(f"Error: {result.get('error', 'Unknown error')}")
+                    # --- Display Results ---
+                    st.header("Results")
 
-# --- Sidebar with Database Info ---
-with st.sidebar:
-    st.header("🗄️ Database Info")
-    
-    # Show database statistics
-    if st.button("📊 Show Database Stats"):
-        with st.spinner("Loading database statistics..."):
-            try:
-                executor = SQLQueryExecutor()
-                
-                # Get basic stats
-                stats_queries = {
-                    "Total Records": "SELECT COUNT(*) as count FROM argo_profiles",
-                    "Unique Floats": "SELECT COUNT(DISTINCT float_id) as count FROM argo_profiles",
-                    "Date Range": "SELECT MIN(time) as min_date, MAX(time) as max_date FROM argo_profiles",
-                    "Depth Range": "SELECT MIN(depth) as min_depth, MAX(depth) as max_depth FROM argo_profiles"
-                }
-                
-                for stat_name, query in stats_queries.items():
-                    result = executor.execute_query(query)
+                    # Display AI Analysis First
+                    st.subheader("🤖 AI Analysis")
+                    if result.get("enhanced_response"):
+                        st.markdown(result["enhanced_response"])
+                    else:
+                        st.warning("Could not generate an AI analysis.")
+
+                    # Use columns for better layout
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.subheader("Generated SQL Query")
+                        st.code(result.get('query', 'N/A'), language='sql')
+
+                    with col2:
+                        st.subheader("Query Status")
+                        if result['success']:
+                            st.success(f"Query executed successfully. Found {result['total_rows']} rows.")
+                        else:
+                            st.error(f"Query failed: {result.get('error', 'Unknown error')}")
+
+
+                    # Display Raw Data if successful
                     if result['success'] and result['data']:
-                        st.metric(stat_name, result['data'][0])
-                        
-            except Exception as e:
-                st.error(f"Could not load database stats: {e}")
-    
-    st.markdown("---")
-    st.markdown("""
-    ### 🔍 Tips for Better Queries:
-    
-    - Be specific about what data you want
-    - Mention columns like temperature, depth, lat, lon
-    - Use terms like "deepest", "surface", "average"
-    - Ask about geographical regions
-    - Inquire about specific floats or time periods
-    
-    ### 📋 Available Columns:
-    - `float_id`: Float identifier
-    - `profile_number`: Profile number
-    - `time`: Measurement timestamp
-    - `lat`, `lon`: Geographic coordinates  
-    - `depth`: Measurement depth (meters)
-    - `temperature`: Water temperature (°C)
-    - `salinity`: Water salinity (PSU)
-    """)
-    
-    st.markdown("---")
-    st.caption("Built with Streamlit & Google Gemini 🤖")
+                        st.subheader("📋 Raw Data Results")
+                        df = pd.DataFrame(result['data'])
+                        st.dataframe(df)
+                        if result['truncated']:
+                            st.info(f"Note: Results are truncated to the first {result['displayed_rows']} rows for display.")
+
+                    # Display historical context
+                    if result.get('context_insights'):
+                        with st.expander("🧠 View Relevant Historical Insights"):
+                            for insight_data in result['context_insights']:
+                                st.markdown(f"**Insight (Similarity: {insight_data['similarity']:.2f}):**")
+                                st.info(f"_{insight_data['insight']}_")
+                                st.caption(f"From a previous question: \"{insight_data['metadata']['question']}\"")
+                                st.markdown("---")
+
+
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {e}")
+        else:
+            st.sidebar.warning("Please enter a question.")
+else:
+    st.error("The application backend could not be started. Please check the console for errors.")
