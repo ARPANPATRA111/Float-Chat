@@ -1,0 +1,131 @@
+# --- database_manager.py ---
+import sqlalchemy as sa
+from sqlalchemy import create_engine, text, JSON
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
+import pandas as pd
+import logging
+from config import get_db_url, USE_SQLITE
+from config import DATA_PROCESSING_CONFIG
+
+# NEW: Import Geometry for PostGIS support
+# Make sure to install with: pip install GeoAlchemy2
+from geoalchemy2 import Geometry
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class Base(DeclarativeBase):
+    pass
+
+class ArgoProfile(Base):
+    __tablename__ = 'argo_profiles'
+    
+    id = sa.Column(sa.Integer, primary_key=True, autoincrement=True)
+    float_id = sa.Column(sa.String, index=True, nullable=False)
+    profile_number = sa.Column(sa.Integer)
+    time = sa.Column(sa.DateTime, index=True)
+    lat = sa.Column(sa.Float)
+    lon = sa.Column(sa.Float)
+    depth = sa.Column(sa.Float)
+    temperature = sa.Column(sa.Float, nullable=True)
+    salinity = sa.Column(sa.Float, nullable=True)
+    doxy = sa.Column(sa.Float, nullable=True)
+    chla = sa.Column(sa.Float, nullable=True)
+    ph = sa.Column(sa.Float, nullable=True)
+    bbp = sa.Column(sa.Float, nullable=True)
+    
+    # NEW: Added GEOMETRY column for efficient spatial queries in PostGIS
+    geom = sa.Column(Geometry(geometry_type='POINT', srid=4326), index=True, nullable=True)
+
+class FloatMetadata(Base):
+    __tablename__ = 'float_metadata'
+    
+    float_id = sa.Column(sa.String, primary_key=True, index=True)
+    wmo_id = sa.Column(sa.String, nullable=True)
+    project_name = sa.Column(sa.String, nullable=True)
+    institution = sa.Column(sa.String, nullable=True)
+    date_launched = sa.Column(sa.String, nullable=True)
+    parameters = sa.Column(JSON, nullable=True)
+
+class DatabaseManager:
+    def __init__(self, db_url=None):
+        self.db_url = db_url or get_db_url()
+        self.engine = create_engine(self.db_url)
+        self.Session = sessionmaker(bind=self.engine)
+        self.is_postgres = not USE_SQLITE and self.db_url.startswith('postgresql')
+
+    def initialize_database(self):
+        try:
+            if self.is_postgres:
+                with self.engine.connect() as conn:
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+                    conn.commit()
+            Base.metadata.create_all(self.engine)
+            logger.info("Database initialized successfully.")
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
+
+    # MODIFIED: Replaced with high-performance bulk insert
+    def insert_argo_data(self, df: pd.DataFrame, metadata_dict: dict):
+        try:
+            # Step 1: Bulk insert profile data
+            df.to_sql(
+                name=ArgoProfile.__tablename__,
+                con=self.engine,
+                if_exists='append',
+                index=False,
+                chunksize=DATA_PROCESSING_CONFIG.get("chunk_size", 5000)
+            )
+            
+            # Step 2: Insert or Update (UPSERT) metadata
+            with self.Session() as session:
+                metadata_obj = FloatMetadata(**metadata_dict)
+                session.merge(metadata_obj)
+                session.commit()
+            
+            logger.info(f"Inserted {len(df)} rows for float {metadata_dict.get('float_id')}")
+            return True
+        except Exception as e:
+            logger.error(f"Error during bulk insert: {e}")
+            return False
+
+    def execute_query(self, query: str):
+        try:
+            with self.engine.connect() as connection:
+                df = pd.read_sql_query(text(query), connection)
+            return {
+                "success": True,
+                "data": df.to_dict('records'),
+                "columns": df.columns.tolist(),
+                "rowcount": len(df)
+            }
+        except Exception as e:
+            logger.error(f"Error executing query: {e}")
+            return {"success": False, "error": str(e), "data": []}
+
+    # MODIFIED: Updated spatial query to use the indexed 'geom' column
+    def spatial_query(self, lat: float, lon: float, radius_km: int = 10):
+        if not self.is_postgres:
+            logger.warning("Spatial queries are only efficiently supported on PostgreSQL with PostGIS.")
+            # Fallback for SQLite (slow)
+            query = f"""
+            SELECT *, (lat - {lat})*(lat - {lat}) + (lon - {lon})*(lon - {lon}) as dist_sq
+            FROM argo_profiles ORDER BY dist_sq LIMIT 10;
+            """
+            return self.execute_query(query)
+
+        # Efficient query for PostGIS
+        # ST_DWithin uses the spatial index and is very fast.
+        query = f"""
+        SELECT *
+        FROM argo_profiles
+        WHERE ST_DWithin(
+            geom,
+            ST_MakePoint({lon}, {lat})::geography,
+            {radius_km * 1000} -- Radius in meters
+        )
+        ORDER BY ST_Distance(geom, ST_MakePoint({lon}, {lat})::geography)
+        LIMIT 20;
+        """
+        return self.execute_query(query)
