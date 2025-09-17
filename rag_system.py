@@ -50,13 +50,13 @@ class VectorStoreManager:
 
 # In rag_system.py, replace the entire class with this one.
 
+# In rag_system.py, replace only the RAGSQLQueryExecutor class
+
 class RAGSQLQueryExecutor:
     def __init__(self, ollama_model=None):
         self.db_manager = DatabaseManager()
         self.vector_store = VectorStoreManager()
         try:
-            # MODIFIED: Using the newer LangChain community package for Ollama
-            # Make sure to run: pip install langchain-ollama
             from langchain_ollama.llms import OllamaLLM
             self.llm = OllamaLLM(
                 base_url=OLLAMA_CONFIG["base_url"],
@@ -68,29 +68,23 @@ class RAGSQLQueryExecutor:
             logger.error(f"❌ Failed to connect to Ollama: {e}")
             raise
 
-        # --- MODIFIED: A much more robust prompt with rules and examples ---
-# In rag_system.py, inside the RAGSQLQueryExecutor class __init__ method
-
-# Replace the entire self.sql_prompt_template with this:
-# In rag_system.py, inside the RAGSQLQueryExecutor class __init__ method
-
-# Replace the entire self.sql_prompt_template with this:
         self.sql_prompt_template = """You are an expert oceanographer and SQL developer for a PostGIS-enabled ARGO float database. Your task is to write a single, simple, and efficient PostgreSQL query to answer the user's question.
 
 ### RULES:
 1.  **ALWAYS** use a simple `WHERE` clause for filtering. Do **NOT** use complex subqueries or `JOIN`s if a simple `WHERE` clause is sufficient.
 2.  For geospatial "nearest" queries, you **MUST** use the `geom` column with the `<->` distance operator. The `geom` column is **ONLY** for location queries.
-3.  **For any filtering by date or time, you MUST use the `time` column.** Do **NOT** use the `geom` column for time-based queries.
-4.  `ST_MakePoint` expects `(longitude, latitude)`.
-5.  Return ONLY the SQL query. Do not add any explanation, markdown, or comments.
-6.  The table name is `argo_profiles`.
+3.  For any filtering by date or time, you **MUST** use the `time` column.
+4.  For complex analytical queries involving "anomaly" or "correlation", retrieve the relevant time-series data. Do not attempt to calculate these statistics directly in SQL.
+5.  `ST_MakePoint` expects `(longitude, latitude)`.
+6.  Return ONLY the SQL query. Do not add any explanation, markdown, or comments.
+7.  The table name is `argo_profiles`.
 
 ### EXAMPLES:
 User Question: How many unique floats are there?
 SQL Query: SELECT COUNT(DISTINCT float_id) FROM argo_profiles;
 
-User Question: What is the average salinity for float 5906256?
-SQL Query: SELECT AVG(salinity) FROM argo_profiles WHERE float_id = '5906256';
+User Question: Show me the temperature depth profile for float 5906256.
+SQL Query: SELECT depth, temperature, float_id, profile_number FROM argo_profiles WHERE float_id = '5906256' ORDER BY depth ASC;
 
 User Question: What are the 5 nearest floats to 15.29 N, 73.91 E?
 SQL Query: SELECT float_id, lat, lon FROM argo_profiles ORDER BY geom <-> ST_SetSRID(ST_MakePoint(73.91, 15.29), 4326) LIMIT 5;
@@ -98,7 +92,7 @@ SQL Query: SELECT float_id, lat, lon FROM argo_profiles ORDER BY geom <-> ST_Set
 
 ### DATABASE SCHEMA:
 - Table: `argo_profiles`
-- Columns: `float_id`, `time` (timestamp), `lat`, `lon`, `depth`, `temperature`, `salinity`, `geom` (geospatial point)
+- Columns: `float_id`, `time` (timestamp), `lat`, `lon`, `depth`, `temperature`, `salinity`, `geom` (geospatial point), `profile_number`
 
 ### CONTEXT FROM DATA METADATA:
 {context}
@@ -108,21 +102,27 @@ SQL Query: SELECT float_id, lat, lon FROM argo_profiles ORDER BY geom <-> ST_Set
 
 SQL Query:"""
 
-        self.response_prompt_template = """You are an expert oceanographer. Summarize the following data to answer the user's question. Be concise and clear.
+        # --- NEW: A much better response prompt ---
+        self.response_prompt_template = """You are an expert oceanographer acting as a helpful AI assistant. The user is seeing a chart generated from the data below. Your task is to provide a brief, insightful summary that guides the user.
 
 ### User Question:
 {question}
 
-### Data:
+### Data Summary:
 {data_summary}
 
-### Analysis:"""
+### Your Response Should:
+1.  Acknowledge that the requested data/chart is being displayed.
+2.  Provide one or two clear, simple oceanographic insights based on the data summary (e.g., "The data shows the typical ocean pattern where temperature decreases as depth increases.").
+3.  Keep the response friendly, concise, and helpful. Do not say "I cannot generate a plot."
 
+Analysis:"""
+
+    # --- The rest of the RAGSQLQueryExecutor class is the same as before ---
+    # (No changes needed for _generate_sql, _summarize_results, or query_with_rag)
     def _generate_sql(self, question: str, context: str):
         prompt = self.sql_prompt_template.format(context=context, question=question)
-        # Using the newer .invoke() method from LangChain
         response = self.llm.invoke(prompt)
-        # The new langchain-ollama returns the content directly
         sql_query = response.strip().replace("```sql", "").replace("```", "").replace(";", "") + ";"
         return sql_query
     
@@ -130,22 +130,17 @@ SQL Query:"""
         if df.empty:
             return "The query returned no results. This could mean there is no data matching your criteria."
         
-        # If only one value is returned, make the response more direct
+        # Create a text summary for the LLM
         if len(df) == 1 and len(df.columns) == 1:
             value = df.iloc[0, 0]
             col_name = df.columns[0]
-            # Nicely format numbers
-            if isinstance(value, float):
-                value_str = f"{value:,.2f}"
-            else:
-                value_str = str(value)
-            summary = f"The result for '{col_name}' is **{value_str}**."
+            if isinstance(value, float): value_str = f"{value:,.2f}"
+            else: value_str = str(value)
+            data_summary = f"The query returned a single value for '{col_name}': {value_str}."
         else:
-            summary = df.head().to_string()
-            if len(df) > 5:
-                summary += f"\n... and {len(df) - 5} more rows."
+            data_summary = f"The query returned {len(df)} data points. Here is a sample:\n{df.head().to_string()}"
             
-        prompt = self.response_prompt_template.format(question=question, data_summary=summary)
+        prompt = self.response_prompt_template.format(question=question, data_summary=data_summary)
         return self.llm.invoke(prompt)
 
     def query_with_rag(self, user_question: str):
