@@ -1,0 +1,24 @@
+# --- Core & Data Handling ---
+pandas
+numpy
+xarray
+netCDF4
+
+# --- Frontend & Visualization ---
+streamlit
+plotly
+
+# --- Database (SQL & Geospatial) ---
+sqlalchemy
+psycopg2-binary
+GeoAlchemy2
+
+# --- AI, LLM & Vector Store ---
+langchain
+langchain-ollama
+sentence-transformers
+chromadb
+
+# --- Utilities ---
+requests
+python-dotenv
