@@ -19,6 +19,7 @@ class ArgoDataProcessor:
         self.db_manager = DatabaseManager()
         self.vector_store = VectorStoreManager()
     
+    # ... (No changes to _convert_time, _extract_metadata, _generate_metadata_summary, process_netcdf_file) ...
     def _convert_time(self, val):
         try:
             if np.issubdtype(type(val), np.number) and not np.isnan(val):
@@ -29,10 +30,7 @@ class ArgoDataProcessor:
 
     def _extract_metadata(self, ds):
         try:
-            # Extract metadata that applies to all profiles in the file
             float_id = ds['PLATFORM_NUMBER'].values[0].decode('utf-8').strip()
-            
-            # Find all available parameters, preferring adjusted versions
             params = [var for var in ds.data_vars if '_ADJUSTED' in var]
             
             metadata = {
@@ -58,7 +56,6 @@ class ArgoDataProcessor:
         return summary
 
     def process_netcdf_file(self, file_path):
-        # This function is now completely rewritten to handle the N_PROF and N_LEVELS structure
         try:
             with xr.open_dataset(file_path, decode_times=False) as ds:
                 file_metadata = self._extract_metadata(ds)
@@ -68,25 +65,19 @@ class ArgoDataProcessor:
                 records = []
                 num_profiles = ds.dims['N_PROF']
 
-                # Loop through each profile in the file
                 for i in range(num_profiles):
                     profile_data = ds.isel(N_PROF=i)
                     
-                    # Extract single values for this specific profile
                     profile_time = self._convert_time(profile_data['JULD'].values)
                     profile_lat = profile_data['LATITUDE'].values
                     profile_lon = profile_data['LONGITUDE'].values
                     cycle_num = int(profile_data['CYCLE_NUMBER'].values)
 
-                    # Get the measurements for all depth levels in this profile
-                    # Always prefer the '_ADJUSTED' variables for accuracy
                     depths = profile_data['PRES_ADJUSTED'].values
                     temps = profile_data['TEMP_ADJUSTED'].values
                     sals = profile_data['PSAL_ADJUSTED'].values
                     
-                    # Loop through each depth level in the profile
                     for j in range(len(depths)):
-                        # Only add record if the core data (depth, temp, sal) is valid
                         if not np.isnan(depths[j]) and not np.isnan(temps[j]) and not np.isnan(sals[j]):
                             records.append({
                                 'float_id': file_metadata['float_id'],
@@ -97,7 +88,6 @@ class ArgoDataProcessor:
                                 'depth': float(depths[j]),
                                 'temperature': float(temps[j]),
                                 'salinity': float(sals[j]),
-                                # Add BGC params if they exist, otherwise None
                                 'doxy': float(profile_data.get('DOXY_ADJUSTED', [np.nan])[j]) if 'DOXY_ADJUSTED' in profile_data else None,
                                 'chla': float(profile_data.get('CHLA_ADJUSTED', [np.nan])[j]) if 'CHLA_ADJUSTED' in profile_data else None
                             })
@@ -111,8 +101,14 @@ class ArgoDataProcessor:
             logger.error(f"Error processing file {file_path}: {e}")
             return None, None
 
+    # --- MODIFIED: process_directory now calls the reset methods first ---
     def process_directory(self, max_files=None):
-        self.db_manager.initialize_database()
+        # Step 1: Reset both databases to ensure a clean slate.
+        logger.info("Preparing to process new data. Clearing old data first...")
+        self.db_manager.reset_database()
+        self.vector_store.reset_vector_store()
+        
+        # Step 2: Proceed with finding and processing files.
         nc_files = sorted(glob.glob(os.path.join(self.data_dir, "*.nc")))
         if max_files: nc_files = nc_files[:max_files]
         

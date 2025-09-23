@@ -20,7 +20,7 @@ USE_SQLITE = False
 # Ollama configuration
 OLLAMA_CONFIG = {
     "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-    "model": "llama3.2",  # MODIFIED: Change this to "llama3.2"
+    "model": "codellama:7b-instruct",  # MODIFIED: Change this to "codellama:13b-instruct"
     "temperature": 0.1,
     "top_p": 0.9
 }

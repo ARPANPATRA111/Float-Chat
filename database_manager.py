@@ -7,8 +7,6 @@ import logging
 from config import get_db_url, USE_SQLITE
 from config import DATA_PROCESSING_CONFIG
 
-# NEW: Import Geometry for PostGIS support
-# Make sure to install with: pip install GeoAlchemy2
 from geoalchemy2 import Geometry
 
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +32,6 @@ class ArgoProfile(Base):
     ph = sa.Column(sa.Float, nullable=True)
     bbp = sa.Column(sa.Float, nullable=True)
     
-    # NEW: Added GEOMETRY column for efficient spatial queries in PostGIS
     geom = sa.Column(Geometry(geometry_type='POINT', srid=4326), index=True, nullable=True)
 
 class FloatMetadata(Base):
@@ -66,10 +63,25 @@ class DatabaseManager:
             logger.error(f"Error initializing database: {e}")
             raise
 
-    # MODIFIED: Replaced with high-performance bulk insert
+    # --- NEW: Method to drop and recreate all tables ---
+    def reset_database(self):
+        """
+        Drops all tables defined in the Base metadata and recreates them.
+        This effectively clears the entire database.
+        """
+        try:
+            logger.warning("--- RESETTING SQL DATABASE ---")
+            Base.metadata.drop_all(self.engine)
+            logger.info("All tables dropped successfully.")
+            self.initialize_database() # Recreate tables and ensure PostGIS is enabled
+            logger.info("--- SQL DATABASE RESET COMPLETE ---")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reset database: {e}")
+            return False
+
     def insert_argo_data(self, df: pd.DataFrame, metadata_dict: dict):
         try:
-            # Step 1: Bulk insert profile data
             df.to_sql(
                 name=ArgoProfile.__tablename__,
                 con=self.engine,
@@ -78,7 +90,6 @@ class DatabaseManager:
                 chunksize=DATA_PROCESSING_CONFIG.get("chunk_size", 5000)
             )
             
-            # Step 2: Insert or Update (UPSERT) metadata
             with self.Session() as session:
                 metadata_obj = FloatMetadata(**metadata_dict)
                 session.merge(metadata_obj)
@@ -104,19 +115,15 @@ class DatabaseManager:
             logger.error(f"Error executing query: {e}")
             return {"success": False, "error": str(e), "data": []}
 
-    # MODIFIED: Updated spatial query to use the indexed 'geom' column
     def spatial_query(self, lat: float, lon: float, radius_km: int = 10):
         if not self.is_postgres:
             logger.warning("Spatial queries are only efficiently supported on PostgreSQL with PostGIS.")
-            # Fallback for SQLite (slow)
             query = f"""
             SELECT *, (lat - {lat})*(lat - {lat}) + (lon - {lon})*(lon - {lon}) as dist_sq
             FROM argo_profiles ORDER BY dist_sq LIMIT 10;
             """
             return self.execute_query(query)
 
-        # Efficient query for PostGIS
-        # ST_DWithin uses the spatial index and is very fast.
         query = f"""
         SELECT *
         FROM argo_profiles
