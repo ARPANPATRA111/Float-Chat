@@ -1,4 +1,4 @@
-# --- rag_system.py ---
+# --- Fixed rag_system.py ---
 import logging
 import pandas as pd
 from langchain_community.llms import Ollama
@@ -6,6 +6,7 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from database_manager import DatabaseManager
 from config import OLLAMA_CONFIG, VECTOR_DB_CONFIG, get_ollama_model
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,14 +49,123 @@ class VectorStoreManager:
             logger.error(f"ChromaDB - Error searching: {e}")
             return []
 
-# In rag_system.py, replace the entire class with this one.
-
-# In rag_system.py, replace only the RAGSQLQueryExecutor class
+class QueryValidator:
+    """Enhanced validator with better ocean region recognition"""
+    
+    def __init__(self):
+        # Enhanced ocean/marine science related keywords
+        self.ocean_keywords = {
+            # Basic oceanographic terms
+            'temperature', 'temp', 'salinity', 'sal', 'depth', 'pressure', 'ocean', 'sea', 'marine',
+            'water', 'float', 'profile', 'argo', 'oceanographic', 'oceanography', 'floats',
+            
+            # Measurements and parameters
+            'chlorophyll', 'chla', 'oxygen', 'doxy', 'ph', 'density', 'conductivity',
+            'nitrate', 'phosphate', 'silicate', 'turbidity', 'fluorescence',
+            
+            # Ocean regions and geography - ENHANCED
+            'latitude', 'longitude', 'lat', 'lon', 'location', 'position', 'coordinate',
+            'north', 'south', 'east', 'west', 'atlantic', 'pacific', 'indian', 'arctic',
+            'mediterranean', 'caribbean', 'gulf', 'bay', 'strait', 'channel',
+            'arabian', 'bengal', 'red', 'black', 'caspian', 'barents', 'norwegian',
+            'region', 'area', 'zone', 'basin', 'ridge', 'trench', 'plateau',
+            
+            # Countries and places near oceans - ADDED
+            'india', 'mumbai', 'goa', 'chennai', 'kochi', 'australia', 'japan',
+            'california', 'florida', 'norway', 'iceland', 'madagascar', 'maldives',
+            
+            # Time-related
+            'time', 'date', 'year', 'month', 'day', 'season', 'seasonal', 'temporal',
+            'recent', 'latest', 'historical', 'trend', 'series', 'current', 'present',
+            
+            # Analysis terms
+            'average', 'mean', 'maximum', 'minimum', 'max', 'min', 'range', 'variation',
+            'anomaly', 'correlation', 'pattern', 'distribution', 'profile', 'gradient',
+            'all', 'show', 'display', 'list', 'find', 'search', 'get', 'what', 'where',
+            
+            # Spatial terms
+            'near', 'nearest', 'around', 'within', 'between', 'above', 'below',
+            'surface', 'deep', 'bottom', 'shallow', 'present', 'available', 'existing'
+        }
+        
+        # Enhanced patterns for better recognition
+        self.query_patterns = [
+            r'\b(?:show|display|plot|graph|chart|list|find|get)\b',
+            r'\b(?:what|where|when|how|which|all|present)\b',
+            r'\b(?:temperature|salinity|depth|pressure|float|floats)\b',
+            r'\b(?:ocean|sea|marine|water)\s+(?:region|area|basin)\b',
+            r'\b(?:indian|pacific|atlantic|arctic)\s+ocean\b',
+            r'\b(?:arabian|bengal|red|black)\s+sea\b',
+            r'\bfloats?\s+(?:in|near|around|present)\b',
+            r'\d+\s*(?:degrees?|°)\s*[ns]',  # Latitude patterns
+            r'\d+\s*(?:degrees?|°)\s*[ew]',  # Longitude patterns
+            r'\d+\s*(?:m|meters?|km|kilometers?)',  # Distance patterns
+        ]
+    
+    def is_ocean_related(self, query: str) -> tuple[bool, float]:
+        """Enhanced validation with better ocean region recognition"""
+        query_lower = query.lower().strip()
+        
+        # Remove common punctuation and normalize
+        normalized_query = re.sub(r'[^\w\s°]', ' ', query_lower)
+        
+        # Check for meaningless input (repeated characters, gibberish)
+        if self._is_gibberish(normalized_query):
+            logger.info(f"Query detected as gibberish: '{query[:30]}...'")
+            return False, 0.0
+        
+        # Check for ocean-related keywords
+        words = set(normalized_query.split())
+        keyword_matches = len(words.intersection(self.ocean_keywords))
+        keyword_score = min(keyword_matches / max(len(words), 1), 1.0)
+        
+        # Check for query patterns with higher weight
+        pattern_matches = sum(1 for pattern in self.query_patterns 
+                            if re.search(pattern, query_lower, re.IGNORECASE))
+        pattern_score = min(pattern_matches / 2, 1.0)  # More lenient
+        
+        # Special boost for ocean regions
+        ocean_region_boost = 0.0
+        ocean_regions = ['indian ocean', 'pacific ocean', 'atlantic ocean', 'arctic ocean',
+                        'arabian sea', 'bay of bengal', 'red sea', 'mediterranean sea']
+        if any(region in query_lower for region in ocean_regions):
+            ocean_region_boost = 0.5
+        
+        # Combined confidence score with region boost
+        confidence = (keyword_score * 0.6) + (pattern_score * 0.4) + ocean_region_boost
+        
+        # More lenient threshold for ocean-related queries
+        is_relevant = confidence > 0.05 or ocean_region_boost > 0
+        
+        logger.info(f"Query validation - '{query[:50]}...' -> Relevant: {is_relevant}, Confidence: {confidence:.3f}")
+        
+        return is_relevant, confidence
+    
+    def _is_gibberish(self, query: str) -> bool:
+        """Detect gibberish but be less aggressive"""
+        words = query.split()
+        
+        if not words:
+            return True
+        
+        # Only flag truly meaningless patterns
+        if len(words) >= 3:
+            # Check if all words are identical (like "what is the what is the")
+            if len(set(words)) <= 2 and all(len(w) <= 4 for w in words):
+                return True
+        
+        # Check for single repeated character patterns
+        if len(query.replace(' ', '')) <= 10 and len(set(query.replace(' ', ''))) <= 2:
+            return True
+        
+        return False
 
 class RAGSQLQueryExecutor:
     def __init__(self, ollama_model=None):
         self.db_manager = DatabaseManager()
         self.vector_store = VectorStoreManager()
+        self.query_validator = QueryValidator()
+        
         try:
             from langchain_ollama.llms import OllamaLLM
             self.llm = OllamaLLM(
@@ -68,42 +178,56 @@ class RAGSQLQueryExecutor:
             logger.error(f"❌ Failed to connect to Ollama: {e}")
             raise
 
-        self.sql_prompt_template = """You are an expert oceanographer and SQL developer for a PostGIS-enabled ARGO float database. Your task is to write a single, simple, and efficient PostgreSQL query to answer the user's question.
+        # Improved fallback responses
+        self.fallback_responses = [
+            "I'm designed to help you explore and analyze ARGO oceanographic data. Please ask questions about ocean temperature, salinity, depth profiles, float locations, or other marine science topics.",
+            
+            "I can help you with oceanographic data queries such as:\n• Temperature and salinity profiles\n• Float locations and movements\n• Depth analysis\n• Time series data\n• Geospatial ocean data\n\nPlease ask a question related to ocean or marine science data.",
+            
+            "I specialize in ARGO ocean float data analysis. Try asking about:\n• 'Show me floats in the Indian Ocean'\n• 'What are the nearest floats to Mumbai?'\n• 'Plot temperature vs depth profiles'\n• 'Find recent temperature data'"
+        ]
 
-### RULES:
-1.  **ALWAYS** use a simple `WHERE` clause for filtering. Do **NOT** use complex subqueries or `JOIN`s if a simple `WHERE` clause is sufficient.
-2.  For geospatial "nearest" queries, you **MUST** use the `geom` column with the `<->` distance operator. The `geom` column is **ONLY** for location queries.
-3.  For any filtering by date or time, you **MUST** use the `time` column.
-4.  For complex analytical queries involving "anomaly" or "correlation", retrieve the relevant time-series data. Do not attempt to calculate these statistics directly in SQL.
-5.  `ST_MakePoint` expects `(longitude, latitude)`.
-6.  Return ONLY the SQL query. Do not add any explanation, markdown, or comments.
-7.  The table name is `argo_profiles`.
+        # FIXED SQL prompt template with better examples and error handling
+        self.sql_prompt_template = """You are an expert oceanographer and SQL developer for a PostGIS-enabled ARGO float database. Generate a simple PostgreSQL query.
 
-### EXAMPLES:
-User Question: How many unique floats are there?
-SQL Query: SELECT COUNT(DISTINCT float_id) FROM argo_profiles;
+### CRITICAL RULES:
+1. Use simple WHERE clauses, avoid complex subqueries
+2. For spatial queries, use ST_Distance with geography casting for accuracy
+3. Always use LIMIT to prevent huge results
+4. The table name is ALWAYS 'argo_profiles'
+5. Return ONLY the SQL query, no explanations
 
-User Question: Show me the temperature depth profile for float 5906256.
-SQL Query: SELECT depth, temperature, float_id, profile_number FROM argo_profiles WHERE float_id = '5906256' ORDER BY depth ASC;
+### COLUMN REFERENCE:
+- float_id (text): Unique float identifier
+- time (timestamp): Measurement timestamp  
+- lat, lon (float): Coordinates
+- depth (float): Depth in meters
+- temperature, salinity (float): Measured values
+- geom (geometry): PostGIS point geometry
 
-User Question: What are the 5 nearest floats to 15.29 N, 73.91 E?
-SQL Query: SELECT float_id, lat, lon FROM argo_profiles ORDER BY geom <-> ST_SetSRID(ST_MakePoint(73.91, 15.29), 4326) LIMIT 5;
----
+### CORRECTED EXAMPLES:
 
-### DATABASE SCHEMA:
-- Table: `argo_profiles`
-- Columns: `float_id`, `time` (timestamp), `lat`, `lon`, `depth`, `temperature`, `salinity`, `geom` (geospatial point), `profile_number`
+User: "Show all floats in the Indian Ocean"
+SQL: SELECT DISTINCT float_id, lat, lon FROM argo_profiles WHERE lat BETWEEN -60 AND 30 AND lon BETWEEN 20 AND 147 LIMIT 50;
 
-### CONTEXT FROM DATA METADATA:
+User: "Find nearest floats to Mumbai (19.07°N, 72.87°E)"
+SQL: SELECT float_id, lat, lon, ST_Distance(ST_MakePoint(lon, lat)::geography, ST_MakePoint(72.87, 19.07)::geography) as distance_m FROM argo_profiles ORDER BY ST_MakePoint(lon, lat)::geography <-> ST_MakePoint(72.87, 19.07)::geography LIMIT 10;
+
+User: "Show temperature profiles for float 1234" 
+SQL: SELECT depth, temperature, time FROM argo_profiles WHERE float_id = '1234' ORDER BY depth LIMIT 500;
+
+User: "What floats are active recently?"
+SQL: SELECT DISTINCT float_id, MAX(time) as latest_time FROM argo_profiles WHERE time > NOW() - INTERVAL '30 days' GROUP BY float_id ORDER BY latest_time DESC LIMIT 20;
+
+### CONTEXT FROM DATA:
 {context}
 
-### CURRENT USER QUESTION:
+### USER QUESTION: 
 {question}
 
 SQL Query:"""
 
-        # --- NEW: A much better response prompt ---
-        self.response_prompt_template = """You are an expert oceanographer acting as a helpful AI assistant. The user is seeing a chart generated from the data below. Your task is to provide a brief, insightful summary that guides the user.
+        self.response_prompt_template = """You are an expert oceanographer. The user asked about ocean data and received results. Provide a brief, helpful response.
 
 ### User Question:
 {question}
@@ -111,53 +235,108 @@ SQL Query:"""
 ### Data Summary:
 {data_summary}
 
-### Your Response Should:
-1.  Acknowledge that the requested data/chart is being displayed.
-2.  Provide one or two clear, simple oceanographic insights based on the data summary (e.g., "The data shows the typical ocean pattern where temperature decreases as depth increases.").
-3.  Keep the response friendly, concise, and helpful. Do not say "I cannot generate a plot."
+### Instructions:
+1. Acknowledge what data is shown
+2. Provide 1-2 simple oceanographic insights
+3. Be encouraging and helpful
+4. Keep response concise (2-3 sentences max)
 
-Analysis:"""
+Response:"""
 
-    # --- The rest of the RAGSQLQueryExecutor class is the same as before ---
-    # (No changes needed for _generate_sql, _summarize_results, or query_with_rag)
+    def _get_fallback_response(self) -> str:
+        """Return a helpful fallback response"""
+        import random
+        return random.choice(self.fallback_responses)
+
     def _generate_sql(self, question: str, context: str):
+        """Enhanced SQL generation with better error handling"""
         prompt = self.sql_prompt_template.format(context=context, question=question)
-        response = self.llm.invoke(prompt)
-        sql_query = response.strip().replace("```sql", "").replace("```", "").replace(";", "") + ";"
-        return sql_query
+        
+        try:
+            response = self.llm.invoke(prompt)
+            # Clean up the response
+            sql_query = response.strip()
+            # Remove any markdown formatting
+            sql_query = re.sub(r'```sql\s*', '', sql_query)
+            sql_query = re.sub(r'```\s*', '', sql_query)
+            # Ensure it ends with semicolon
+            if not sql_query.endswith(';'):
+                sql_query += ';'
+            
+            logger.info(f"Generated SQL query: {sql_query}")
+            return sql_query
+            
+        except Exception as e:
+            logger.error(f"Error generating SQL: {e}")
+            # Return a safe fallback query
+            return "SELECT COUNT(*) as total_records FROM argo_profiles LIMIT 1;"
     
     def _summarize_results(self, question: str, df: pd.DataFrame):
         if df.empty:
-            return "The query returned no results. This could mean there is no data matching your criteria."
+            return "No data found matching your criteria. This could mean the area or timeframe you specified doesn't have available measurements, or the query parameters were too restrictive."
         
-        # Create a text summary for the LLM
+        # Create a concise data summary for the LLM
         if len(df) == 1 and len(df.columns) == 1:
             value = df.iloc[0, 0]
             col_name = df.columns[0]
-            if isinstance(value, float): value_str = f"{value:,.2f}"
-            else: value_str = str(value)
-            data_summary = f"The query returned a single value for '{col_name}': {value_str}."
+            if isinstance(value, (int, float)): 
+                value_str = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
+            else: 
+                value_str = str(value)
+            data_summary = f"Single result: {col_name} = {value_str}"
         else:
-            data_summary = f"The query returned {len(df)} data points. Here is a sample:\n{df.head().to_string()}"
+            # More concise summary
+            cols = ', '.join(df.columns[:4])  # Only first 4 columns
+            data_summary = f"Found {len(df)} records with columns: {cols}. Sample values: {df.head(2).to_dict('records')}"
             
         prompt = self.response_prompt_template.format(question=question, data_summary=data_summary)
-        return self.llm.invoke(prompt)
+        
+        try:
+            return self.llm.invoke(prompt)
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return f"I found {len(df)} records matching your query. The data includes measurements from ARGO ocean floats."
 
     def query_with_rag(self, user_question: str):
         try:
-            logger.info(f"Searching for context related to: '{user_question}'")
-            context_docs = self.vector_store.search(user_question)
-            context = "\n".join(f"- {doc}" for doc in context_docs) if context_docs else "No specific context found."
+            # Validate query relevance
+            is_relevant, confidence = self.query_validator.is_ocean_related(user_question)
             
-            logger.info(f"Generating SQL with context:\n{context}")
+            if not is_relevant:
+                logger.info(f"Query rejected as irrelevant: '{user_question}' (confidence: {confidence:.3f})")
+                return {
+                    "success": True,
+                    "enhanced_response": self._get_fallback_response(),
+                    "generated_query": None,
+                    "data": [],
+                    "columns": [],
+                    "fallback_used": True
+                }
+            
+            # Process relevant queries
+            logger.info(f"Processing relevant query: '{user_question}' (confidence: {confidence:.3f})")
+            
+            # Get context from vector store
+            context_docs = self.vector_store.search(user_question)
+            context = "\n".join(f"- {doc}" for doc in context_docs) if context_docs else "No specific float context found."
+            
+            # Generate SQL
             sql_query = self._generate_sql(user_question, context)
-            logger.info(f"Generated SQL: {sql_query}")
-
+            
+            # Execute query with better error handling
             query_result = self.db_manager.execute_query(sql_query)
             
             if not query_result["success"]:
-                raise Exception(query_result["error"])
+                logger.error(f"SQL execution failed: {query_result.get('error', 'Unknown error')}")
+                return {
+                    "success": False,
+                    "error": f"Database query failed: {query_result.get('error', 'Unknown error')}",
+                    "enhanced_response": "I encountered an error while querying the database. This might be due to a syntax issue or database connectivity problem. Please try rephrasing your question or contact support.",
+                    "data": [],
+                    "fallback_used": False
+                }
 
+            # Process results
             df = pd.DataFrame(query_result['data'])
             enhanced_response = self._summarize_results(user_question, df)
             
@@ -166,13 +345,16 @@ Analysis:"""
                 "enhanced_response": enhanced_response,
                 "generated_query": sql_query,
                 "data": query_result['data'],
-                "columns": query_result['columns']
+                "columns": query_result['columns'],
+                "fallback_used": False
             }
+            
         except Exception as e:
             logger.error(f"RAG query failed: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "enhanced_response": f"I'm sorry, an error occurred: {e}",
-                "data": []
+                "enhanced_response": f"An unexpected error occurred while processing your oceanographic data query. Error details: {str(e)}",
+                "data": [],
+                "fallback_used": False
             }
