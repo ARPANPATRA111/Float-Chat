@@ -2,7 +2,7 @@
 
 An AI-powered conversational system for exploring and visualizing ARGO oceanographic data using natural language. This project was developed for the Smart India Hackathon 2025.
 
-<img width="1575" height="837" alt="image" src="https://github.com/user-attachments/assets/fc4efd2a-2853-4a26-be14-19a8688e8b98" />
+[![Argo-Image](Image.png)](https://youtu.be/yyb6x2UbPyU)
 
 ## 🌟 Overview
 
